@@ -128,6 +128,8 @@ def main():
             # iterate through each index
             for index in INDEXES:
                 index = index.strip()
+                if index == '':
+                    continue
                 config_surgery = (df_surgery
                                   .loc[(df_surgery['INDEX']==index)|(df_surgery['INDEX']==DEFAULT_SYMBOL),:] # 匹配相同與DEFAULT
                                   .sort_values(by=['INDEX'], axis=0) # DEFAULT排序較後面
