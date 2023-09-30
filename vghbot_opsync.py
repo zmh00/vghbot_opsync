@@ -156,7 +156,7 @@ def main():
                 else: # 如果有差異
                     df = schedule_process(raw_df.copy(), response_text)
                     wsheet.set_dataframe(df, 'A1', copy_index=False, nan='')
-                    logger.info(f'{datetime.today()}|Sync ONCE')
+                    logger.info(f'{datetime.today()}|Sync:{index}')
                     old_df[index] = raw_df # 存入做下次比較
             old_indexes = INDEXES
         except Exception as e:
