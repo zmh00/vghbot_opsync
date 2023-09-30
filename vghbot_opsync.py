@@ -1,10 +1,11 @@
 from vghbot_kit import vghbot_login, gsheet
-import configparser, time
+import time
 import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime
 from io import StringIO
 import random
+import logging
 
 def schedule_get(doc):
     '''
@@ -44,19 +45,128 @@ def schedule_process(df, response_text):
     formatted_df = df[['手術日期', '手術時間', '姓名', '病歷號', '診斷', '側別', '手術', '備註', '麻醉','病房床號', '開刀房號', '狀態']]
     return formatted_df
 
-config = configparser.ConfigParser()
-config.read('opsync.ini', encoding='utf-8')
 
+def gsheet_acc(dr_code: str):
+    '''
+    Input: short code of account. Ex:4123
+    Output: return dictionary of {'ACCOUNT':...,'PASSWORD':...,'NAME':...} 
+    '''
+    df = gc.get_df(gsheet.GSHEET_SPREADSHEET, gsheet.GSHEET_WORKSHEET_ACC)
+    dr_code = str(dr_code).upper()
+    selector = df['ACCOUNT'].str.contains(dr_code, case = False)
+    selected_df = df.loc[selector,:]
+    if len(selected_df) == 0: # 資料庫中沒有此帳密
+        logger.error(f"USER({dr_code}) NOT EXIST IN CONFIG")
+        return None, None
+        
+    elif len(selected_df) > 1:
+        logger.error(f"MORE THAN ONE RECORD: {dr_code}, WILL USE THE FIRST ONE")
+
+    result = selected_df.iloc[0,:].to_dict() #df變成series再輸出成dict
+    return result['ACCOUNT'], result['PASSWORD']
+
+
+# Initialization
 gc = gsheet.GsheetClient()
-webclient = vghbot_login.Client(login_id=config['DEFAULT'].get('login_id'), login_psw=config['DEFAULT'].get('login_psw')) # TODO 未來替換成查雲端表
+config = gc.get_col_dict(gsheet.GSHEET_SPREADSHEET, gsheet.GSHEET_WORKSHEET_OPSYNC)
+for c in config: # 將list格式去掉
+    if len(config[c]) == 1:
+        config[c] = config[c][0]
+
+login_id, login_psw = gsheet_acc(config.get('LOGIN_DOC'))
+webclient = vghbot_login.Client(login_id=login_id, login_psw=login_psw)
 webclient.login_drweb()
 
+# Logging 設定
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)  # 這是logger的level
+BASIC_FORMAT = '[%(asctime)s %(levelname)-8s] %(message)s'
+DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
+formatter = logging.Formatter(BASIC_FORMAT, datefmt=DATE_FORMAT)
+# 設定file handler的設定
+log_filename = "opsync.log"
+fh = logging.FileHandler(log_filename)  # 預設mode='a'，持續寫入
+fh.setLevel(logging.INFO)
+fh.setFormatter(formatter)
 
-WORKSHEET_SYNC = 'sync'
-OLD_INDEXES = []
-OLD_DF = dict()
-WORKING_START = datetime.strptime(config['DEFAULT'].get('working_start'), '%H:%M').time()
-WORKING_END = datetime.strptime(config['DEFAULT'].get('working_end'), '%H:%M').time()
+# 設定console handler的設定 # TODO 可移除
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)  # 可以獨立設定console handler的level，如果不設就會預設使用logger的level
+ch.setFormatter(formatter)
+
+# 將handler裝上
+logger.addHandler(ch) # TODO 可移除
+logger.addHandler(fh)
+
+WORKSHEET_SYNC = config.get('WORKSHEET_SYNC')
+WORKING_START = datetime.strptime(config.get('WORKING_START'), '%H:%M').time()
+WORKING_END = datetime.strptime(config.get('WORKING_END'), '%H:%M').time()
+DEFAULT_SYMBOL = '~'
+
+old_indexes = []
+old_df = dict()
+
+
+def main():
+    global old_df, old_indexes
+    while True:
+        try:
+            now = datetime.today().time()
+            if WORKING_START <= now <= WORKING_END:
+                INTERVAL = int(config.get('WORKING_INTERVAL'))
+            else:
+                INTERVAL = int(config.get('RESTING_INTERVAL'))
+
+            INDEXES = config.get('INDEXES') # INDEXES 統一使用list型態
+            if type(INDEXES) != list:
+                INDEXES = [INDEXES]
+            
+            if INDEXES != old_indexes:
+                df_surgery = gc.get_df(gsheet.GSHEET_SPREADSHEET, gsheet.GSHEET_WORKSHEET_SURGERY) # 讀取index對應的config
+            # get specified indexes from gsheet
+            
+            # iterate through each index
+            for index in INDEXES:
+                index = index.strip()
+                config_surgery = (df_surgery
+                                  .loc[(df_surgery['INDEX']==index)|(df_surgery['INDEX']==DEFAULT_SYMBOL),:] # 匹配相同與DEFAULT
+                                  .sort_values(by=['INDEX'], axis=0) # DEFAULT排序較後面
+                                  .to_dict('records')[0] # filter出來是dataframe格式
+                                  ) 
+                ssheet = gc.client.open(config_surgery['SPREADSHEET'])
+                
+                # check if the worksheet is already created
+                new = True
+                for wsheet in ssheet: 
+                    if wsheet.title == WORKSHEET_SYNC:
+                        new = False
+                        break
+                if new:
+                    wsheet = ssheet.add_worksheet(title=WORKSHEET_SYNC) # create one if not exist
+                else:
+                    wsheet = ssheet.worksheet_by_title(WORKSHEET_SYNC)
+
+                raw_df, response_text = schedule_get(index)
+                
+                if raw_df.equals(old_df.get(index)): # 如果跟上次相同就continue
+                    logger.info(f'{datetime.today()}|No change for {index}')
+                    continue
+                else: # 如果有差異
+                    df = schedule_process(raw_df.copy(), response_text)
+                    wsheet.set_dataframe(df, 'A1', copy_index=False, nan='')
+                    logger.info(f'{datetime.today()}|Sync ONCE')
+                    old_df[index] = raw_df # 存入做下次比較
+            old_indexes = INDEXES
+        except Exception as e:
+            logger.error(e)
+        finally:
+            logger.info(f"WAITING INTERVAL: {INTERVAL}")
+            time.sleep(INTERVAL + random.randint(0, int(INTERVAL/10)))
+
+if __name__ == '__main__':
+    main()
+
+# pyinstaller -F vghbot_opsync.py
 
 # ini file
 # [DEFAULT]
@@ -67,51 +177,3 @@ WORKING_END = datetime.strptime(config['DEFAULT'].get('working_end'), '%H:%M').t
 # WORKING_END = 20:30
 # RESTING_INTERVAL = 1800
 # INDEXES = 4066
-
-while True:
-    try:
-        now = datetime.today().time()
-        if WORKING_START <= now <= WORKING_END:
-            INTERVAL = config['DEFAULT'].getint('working_interval')
-        else:
-            INTERVAL = config['DEFAULT'].getint('resting_interval')
-        
-        print(f"WAITING INTERVAL: {INTERVAL}")
-
-        INDEXES = config['DEFAULT'].get('indexes').split(',')
-        if INDEXES != OLD_INDEXES:
-            df_surgery = gc.get_df(gsheet.GSHEET_SPREADSHEET, gsheet.GSHEET_WORKSHEET_SURGERY) # 讀取index對應的config
-        # get specified indexes from gsheet
-        
-        # iterate through each index
-        for index in INDEXES:
-            index = index.strip()
-            config_surgery = df_surgery.loc[df_surgery['INDEX']==index,:].to_dict('records')[0] # FIXME 這是series還是dataframe to_dict??
-            ssheet = gc.client.open(config_surgery['SPREADSHEET'])
-            
-            # check if the worksheet is already created
-            new = True
-            for wsheet in ssheet: 
-                if wsheet.title == WORKSHEET_SYNC:
-                    new = False
-                    break
-            if new:
-                wsheet = ssheet.add_worksheet(title=WORKSHEET_SYNC) # create one if not exist
-            else:
-                wsheet = ssheet.worksheet_by_title(WORKSHEET_SYNC)
-
-            raw_df, response_text = schedule_get(index)
-            
-            if raw_df.equals(OLD_DF.get(index)): # 如果跟上次相同就continue
-                print(f'{datetime.today()}|No change for {index}')
-                continue
-            else: # 如果有差異
-                df = schedule_process(raw_df.copy(), response_text)
-                wsheet.set_dataframe(df, 'A1', copy_index=False, nan='')
-                print(f'{datetime.today()}|Sync ONCE')
-                OLD_DF[index] = raw_df # 存入做下次比較
-        OLD_INDEXES = INDEXES
-    except Exception as e:
-        print(e)
-    finally:
-        time.sleep(INTERVAL + random.randint(0, int(INTERVAL/10)))
