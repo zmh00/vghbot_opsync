@@ -33,4 +33,4 @@ ENV/
 env.bak/
 venv.bak/
 
-.ini
+*.ini
