@@ -2,7 +2,7 @@ from vghbot_kit import vghbot_login, gsheet
 import time
 import pandas as pd
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import StringIO
 import random
 import logging
@@ -17,7 +17,7 @@ def schedule_get(doc):
         'action': 'findOpblist',
         'type': 'opbmain',
         'qry': doc, # '4102',
-        'bgndt': str(datetime.today().year - 1911) + datetime.today().strftime("%m%d"), # '1120703',
+        'bgndt': str(datetime.today().year - 1911) + (datetime.today()+SEARCH_OFFSET).strftime("%m%d"), # '1120703',
         '_': int(time.time()*1000)
     }
     response = webclient.session.get(url, params=payload_doc)
@@ -101,7 +101,8 @@ logger.addHandler(fh)
 WORKSHEET_SYNC = config.get('WORKSHEET_SYNC')
 WORKING_START = datetime.strptime(config.get('WORKING_START'), '%H:%M').time()
 WORKING_END = datetime.strptime(config.get('WORKING_END'), '%H:%M').time()
-DEFAULT_SYMBOL = '~'
+SEARCH_OFFSET = timedelta(int(config.get('SEARCH_OFFSET')))
+DEFAULT_SYMBOL = config.get('DEFAULT_SYMBOL')
 
 old_indexes = []
 old_df = dict()
