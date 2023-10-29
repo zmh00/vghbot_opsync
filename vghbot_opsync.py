@@ -150,13 +150,16 @@ def main():
                     wsheet = ssheet.worksheet_by_title(WORKSHEET_SYNC)
 
                 raw_df, response_text = schedule_get(index)
+                update_time = datetime.today().strftime("%Y-%m-%d %H:%M:%S")
+
                 
                 if raw_df.equals(old_df.get(index)): # 如果跟上次相同就continue
                     logger.info(f'{datetime.today()}|No change for {index}')
                     continue
                 else: # 如果有差異
                     df = schedule_process(raw_df.copy(), response_text)
-                    wsheet.set_dataframe(df, 'A1', copy_index=False, nan='')
+                    wsheet.update_value('A1', f"更新時間:{update_time}")
+                    wsheet.set_dataframe(df, 'A2', copy_index=False, nan='')
                     logger.info(f'{datetime.today()}|Sync:{index}')
                     old_df[index] = raw_df # 存入做下次比較
             old_indexes = INDEXES
