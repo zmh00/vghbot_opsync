@@ -7,7 +7,7 @@ from io import StringIO
 import random
 import logging
 
-def schedule_get(doc):
+def schedule_get(webclient, doc, search_offset):
     '''
     回傳今天以後的未處理手術排程df+response.text
     傳入參數: 醫師燈號(4102)
@@ -17,7 +17,7 @@ def schedule_get(doc):
         'action': 'findOpblist',
         'type': 'opbmain',
         'qry': doc, # '4102',
-        'bgndt': str(datetime.today().year - 1911) + (datetime.today()+SEARCH_OFFSET).strftime("%m%d"), # '1120703',
+        'bgndt': str(datetime.today().year - 1911) + (datetime.today()+search_offset).strftime("%m%d"), # '1120703',
         '_': int(time.time()*1000)
     }
     response = webclient.session.get(url, params=payload_doc)
@@ -46,7 +46,7 @@ def schedule_process(df, response_text):
     return formatted_df
 
 
-def gsheet_acc(dr_code: str):
+def gsheet_acc(gc, dr_code: str):
     '''
     Input: short code of account. Ex:4123
     Output: return dictionary of {'ACCOUNT':...,'PASSWORD':...,'NAME':...} 
@@ -65,17 +65,6 @@ def gsheet_acc(dr_code: str):
     result = selected_df.iloc[0,:].to_dict() #df變成series再輸出成dict
     return result['ACCOUNT'], result['PASSWORD']
 
-
-# Initialization
-gc = gsheet.GsheetClient()
-config = gc.get_col_dict(gsheet.GSHEET_SPREADSHEET, gsheet.GSHEET_WORKSHEET_OPSYNC)
-for c in config: # 將list格式去掉
-    if len(config[c]) == 1:
-        config[c] = config[c][0]
-
-login_id, login_psw = gsheet_acc(config.get('LOGIN_DOC'))
-webclient = vghbot_login.Client(login_id=login_id, login_psw=login_psw)
-webclient.login_drweb()
 
 # Logging 設定
 logger = logging.getLogger()
@@ -98,11 +87,7 @@ ch.setFormatter(formatter)
 logger.addHandler(ch) # TODO 可移除
 logger.addHandler(fh)
 
-WORKSHEET_SYNC = config.get('WORKSHEET_SYNC')
-WORKING_START = datetime.strptime(config.get('WORKING_START'), '%H:%M').time()
-WORKING_END = datetime.strptime(config.get('WORKING_END'), '%H:%M').time()
-SEARCH_OFFSET = timedelta(int(config.get('SEARCH_OFFSET')))
-DEFAULT_SYMBOL = config.get('DEFAULT_SYMBOL')
+
 
 old_indexes = []
 old_df = dict()
@@ -112,6 +97,24 @@ def main():
     global old_df, old_indexes
     while True:
         try:
+            # Initialization every cycle
+            gc = gsheet.GsheetClient()
+            config = gc.get_col_dict(gsheet.GSHEET_SPREADSHEET, gsheet.GSHEET_WORKSHEET_OPSYNC)
+            for c in config: # 將list格式去掉
+                if len(config[c]) == 1:
+                    config[c] = config[c][0]
+
+            login_id, login_psw = gsheet_acc(gc, config.get('LOGIN_DOC'))
+            webclient = vghbot_login.Client(login_id=login_id, login_psw=login_psw)
+            webclient.login_drweb()
+
+            WORKSHEET_SYNC = config.get('WORKSHEET_SYNC')
+            WORKING_START = datetime.strptime(config.get('WORKING_START'), '%H:%M').time()
+            WORKING_END = datetime.strptime(config.get('WORKING_END'), '%H:%M').time()
+            SEARCH_OFFSET = timedelta(int(config.get('SEARCH_OFFSET')))
+            DEFAULT_SYMBOL = config.get('DEFAULT_SYMBOL')
+
+
             now = datetime.today().time()
             if WORKING_START <= now <= WORKING_END:
                 INTERVAL = int(config.get('WORKING_INTERVAL'))
@@ -149,7 +152,7 @@ def main():
                 else:
                     wsheet = ssheet.worksheet_by_title(WORKSHEET_SYNC)
 
-                raw_df, response_text = schedule_get(index)
+                raw_df, response_text = schedule_get(webclient, index, SEARCH_OFFSET)
                 update_time = datetime.today().strftime("%Y-%m-%d %H:%M:%S")
 
                 
