@@ -39,10 +39,37 @@ def schedule_process(df, response_text):
     tooltip_list = soup.find_all('a', attrs={'data-toggle':"tooltip"})
     df['tooltip'] = [l['title'] for l in tooltip_list]
     df = pd.concat([df, df['tooltip'].str.extract(r'術前診斷:\s*(?P<診斷>.*?)\s*手術名稱:\s*(?P<手術>.*?)\s*手術室資訊:\s*(?P<備註>.*?)\s*麻醉:\s*(?P<麻醉>.*?)\s*$')], axis=1 )
+    
+    df = df.assign(
+        LenSx = '',
+        IOL = '',
+        Final = '',
+        SN = '',
+        Complications = ''
+    )
+    # 側別: 利用診斷內部的ODOS標記判斷側別 # TODO未來考慮更細緻的判斷，雙眼做不同手術的那種
     df['側別'] = df['診斷'].str.extract(r'\s([Oo][Dd]|[Oo][Ss]|[Oo][Uu])')
     df['側別'] = df['側別'].str.upper()
 
-    formatted_df = df[['手術日期', '手術時間', '姓名', '病歷號', '診斷', '側別', '手術', '備註', '麻醉','病房床號', '開刀房號', '狀態']]
+    try:    
+        # Lensx
+        df.loc[df['手術'].str.contains('lensx', case=False), 'LenSx'] = 'LenSx' # 按照手術找是否有lensx
+    except:
+        logger.error("Regex error: Lensx")
+        
+    try:
+        # IOL
+        df['IOL'] = df['手術'].str.extract(r"IOL.*\(\s*([\w\d]+(?=\s|(?=\+)))") # 匹配字串"IOL"後方且"("後方擷取文字包含數字，且要在後方的空格之前或是後方的"+"之前
+    except:
+        logger.error("Regex error: IOL")
+    
+    try:
+        # Final
+        df['Final'] = df['手術'].str.extract(r"(?<!T:)(?<!T)(?<!t)(?<!t:)([+-]+\d+\.\d+)") # 匹配後方有+/-號開頭的數字，且需要有小數點，且前方不該出現T:/T/t:/t
+    except:
+        logger.error("Regex error: Final")
+        
+    formatted_df = df[['手術日期', '手術時間', '姓名', '病歷號', '診斷', '手術', '側別', 'LenSx', 'IOL', 'Final', 'SN',	'Complications', '備註', '開刀房號', '麻醉','病房床號', '狀態']]
     return formatted_df
 
 
@@ -92,55 +119,44 @@ logger.addHandler(fh)
 old_indexes = []
 old_df = dict()
 
+# TODO 因為每個擷取能設定獨立的啟動終止時間和interval，應該要設計成多線程，每個是獨立的，目前是共用最後一個interval
 
 def main():
     global old_df, old_indexes
     while True:
         try:
-            # Initialization every cycle
+            # Initialization every cycle，先載入config和欲登入查詢的燈號
             gc = gsheet.GsheetClient()
-            config = gc.get_col_dict(gsheet.GSHEET_SPREADSHEET, gsheet.GSHEET_WORKSHEET_OPSYNC)
-            for c in config: # 將list格式去掉
-                if len(config[c]) == 1:
-                    config[c] = config[c][0]
-
-            login_id, login_psw = gsheet_acc(gc, config.get('LOGIN_DOC'))
+            config = gc.get_col_dict(gsheet.GSHEET_SPREADSHEET, gsheet.GSHEET_WORKSHEET_CONFIG)
+            login_id, login_psw = gsheet_acc(gc, config.get('OPSYNC_LOGIN_DOC')[0])
             webclient = vghbot_login.Client(login_id=login_id, login_psw=login_psw)
             webclient.login_drweb()
-
-            WORKSHEET_SYNC = config.get('WORKSHEET_SYNC')
-            WORKING_START = datetime.strptime(config.get('WORKING_START'), '%H:%M').time()
-            WORKING_END = datetime.strptime(config.get('WORKING_END'), '%H:%M').time()
-            SEARCH_OFFSET = timedelta(int(config.get('SEARCH_OFFSET')))
-            DEFAULT_SYMBOL = config.get('DEFAULT_SYMBOL')
-
-
-            now = datetime.today().time()
-            if WORKING_START <= now <= WORKING_END:
-                INTERVAL = int(config.get('WORKING_INTERVAL'))
-            else:
-                INTERVAL = int(config.get('RESTING_INTERVAL'))
-
-            INDEXES = config.get('INDEXES') # INDEXES 統一使用list型態
-            if type(INDEXES) != list:
-                INDEXES = [INDEXES]
             
-            if INDEXES != old_indexes:
-                df_surgery = gc.get_df(gsheet.GSHEET_SPREADSHEET, gsheet.GSHEET_WORKSHEET_SURGERY) # 讀取index對應的config
-            # get specified indexes from gsheet
-            
-            # iterate through each index
-            for index in INDEXES:
-                index = index.strip()
-                if index == '':
+            # 載入opsync清單
+            sync_df = gc.get_df(gsheet.GSHEET_SPREADSHEET, gsheet.GSHEET_WORKSHEET_OPSYNC)
+
+            # iterate each row of the config and do ...
+            for row in sync_df.itertuples(index=True, name='Pandas'):
+                # read every row data of opsync
+                INDEX = row.INDEX.strip()
+                if INDEX == '': # 跳過空列
                     continue
-                config_surgery = (df_surgery
-                                  .loc[(df_surgery['INDEX']==index)|(df_surgery['INDEX']==DEFAULT_SYMBOL),:] # 匹配相同與DEFAULT
-                                  .sort_values(by=['INDEX'], axis=0) # DEFAULT排序較後面
-                                  .to_dict('records')[0] # filter出來是dataframe格式
-                                  ) 
-                ssheet = gc.client.open(config_surgery['SPREADSHEET'])
                 
+                SPREADSHEET_SYNC = row.SPREADSHEET_SYNC
+                WORKSHEET_SYNC = row.WORKSHEET_SYNC
+                WORKING_START = datetime.strptime(row.WORKING_START, '%H:%M').time()
+                WORKING_END = datetime.strptime(row.WORKING_END, '%H:%M').time()
+                SEARCH_OFFSET = timedelta(int(row.SEARCH_OFFSET))
+                DEFAULT_SYMBOL = row.DEFAULT_SYMBOL # TODO remove
+
+                now = datetime.today().time()
+                if WORKING_START <= now <= WORKING_END:
+                    INTERVAL = int(row.WORKING_INTERVAL)
+                else:
+                    INTERVAL = int(row.RESTING_INTERVAL)
+
+                # Main
+                ssheet = gc.client.open(SPREADSHEET_SYNC)
                 # check if the worksheet is already created
                 new = True
                 for wsheet in ssheet: 
@@ -152,20 +168,21 @@ def main():
                 else:
                     wsheet = ssheet.worksheet_by_title(WORKSHEET_SYNC)
 
-                raw_df, response_text = schedule_get(webclient, index, SEARCH_OFFSET)
+                # 擷取手術排成資料
+                raw_df, response_text = schedule_get(webclient, INDEX, SEARCH_OFFSET)
                 update_time = datetime.today().strftime("%Y-%m-%d %H:%M:%S")
 
                 
-                if raw_df.equals(old_df.get(index)): # 如果跟上次相同就continue
-                    logger.info(f'{datetime.today()}|No change for {index}')
+                if raw_df.equals(old_df.get(INDEX)): # 如果跟上次相同就continue
+                    logger.info(f'{datetime.today()}|No change for {INDEX}')
                     continue
                 else: # 如果有差異
                     df = schedule_process(raw_df.copy(), response_text)
                     wsheet.update_value('A1', f"更新時間:{update_time}")
-                    wsheet.set_dataframe(df, 'A2', copy_index=False, nan='')
-                    logger.info(f'{datetime.today()}|Sync:{index}')
-                    old_df[index] = raw_df # 存入做下次比較
-            old_indexes = INDEXES
+                    wsheet.set_dataframe(df, 'B1', copy_index=False, nan='')
+                    logger.info(f'{datetime.today()}|Sync:{INDEX}')
+                    old_df[INDEX] = raw_df # 存入做下次比較
+
         except Exception as e:
             logger.error(e)
         finally:
@@ -176,13 +193,3 @@ if __name__ == '__main__':
     main()
 
 # pyinstaller -F vghbot_opsync.py
-
-# ini file
-# [DEFAULT]
-# LOGIN_ID = ***
-# LOGIN_PSW = ***
-# WORKING_INTERVAL = 180
-# WORKING_START = 08:30
-# WORKING_END = 20:30
-# RESTING_INTERVAL = 1800
-# INDEXES = 4066
